@@ -95,3 +95,5 @@ function AntiFly._IsCharacterNotFlying(model: Model, root: BasePart, Params: Ray
 end
 
 return AntiFly
+-- add crash client next to prevent exploiters from using save instance()
+-- For crash client just do server scriot with an initter from client that checks client for user using save instance() then in terminal for user only create infinite loop of char to crash client
