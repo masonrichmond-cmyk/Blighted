@@ -25,6 +25,7 @@ local Sounds = require(ReplicatedStorage.Modules.Sounds)
 --
 -- Passive #3 - Corrupt Trail:
 --   Continuously spawns a trail that lasts 4 seconds
+--   Trail forms from small parts that connect to the floor
 --   Survivor interaction: Steps in trail -> highlighted + John Doe gets 5% speed boost
 --============================================================
 
@@ -36,60 +37,149 @@ local TRAIL_LIFETIME = 4
 local TRAIL_SPEED_BOOST = 1.05      -- 5% speed boost
 local FLING_FORCE = 150             -- force for counter fling effect
 local TRAIL_CHECK_INTERVAL = 0.2    -- how often to check for survivors in trail
+local TRAIL_SPAWN_INTERVAL = 0.2    -- spawn a trail segment every 0.2 seconds
+local TRAIL_SEGMENT_SIZE = 1.2      -- size of individual trail segments
 
 --============================================================
--- Corrupt Trail Management
+-- Trail Segment Creation and Management
 --============================================================
-local function SpawnTrailEffect(Position: Vector3, CustomTrailModel: Model?)
-	-- If a custom trail model is provided, clone and use it
-	-- Otherwise use the default visual placeholder
+local function CreateTrailSegment(Position: Vector3, CustomSegmentTemplate: Instance?): Instance?
+	-- Raycast downward to find the floor
+	local RaycastParams = RaycastParams.new()
+	RaycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+	RaycastParams.FilterDescendantsInstances = {workspace.Debris, workspace.Effects}
 	
-	local TrailEffect
+	local RayDirection = Vector3.new(0, -50, 0) -- raycast down 50 studs
+	local RayResult = workspace:Raycast(Position, RayDirection, RaycastParams)
 	
-	if CustomTrailModel then
-		TrailEffect = CustomTrailModel:Clone()
-		TrailEffect.Parent = workspace
-		TrailEffect:SetPrimaryPartCFrame(CFrame.new(Position))
-	else
-		-- Default placeholder trail effect
-		TrailEffect = Instance.new("Part")
-		TrailEffect.Name = "CorruptTrail"
-		TrailEffect.Shape = Enum.PartType.Ball
-		TrailEffect.Size = Vector3.new(3, 0.5, 3)
-		TrailEffect.CanCollide = false
-		TrailEffect.CanQuery = false
-		TrailEffect.CanTouch = true
-		TrailEffect.CastShadow = false
-		TrailEffect.Transparency = 0.7
-		TrailEffect.BrickColor = BrickColor.new("Dark indigo")
-		TrailEffect.CFrame = CFrame.new(Position)
-		TrailEffect.Parent = workspace
+	if not RayResult then
+		return nil -- no floor found, don't create segment
 	end
 	
-	return TrailEffect
+	local FloorPosition = RayResult.Position
+	local FloorNormal = RayResult.Normal
+	
+	-- Create or clone the trail segment
+	local TrailSegment
+	
+	if CustomSegmentTemplate then
+		TrailSegment = CustomSegmentTemplate:Clone()
+	else
+		-- Default placeholder segment
+		TrailSegment = Instance.new("Part")
+		TrailSegment.Name = "CorruptTrailSegment"
+		TrailSegment.Shape = Enum.PartType.Block
+		TrailSegment.Size = Vector3.new(TRAIL_SEGMENT_SIZE, 0.3, TRAIL_SEGMENT_SIZE)
+		TrailSegment.Material = Enum.Material.Neon
+		TrailSegment.BrickColor = BrickColor.new("Dark indigo")
+		TrailSegment.TopSurface = Enum.SurfaceType.Smooth
+		TrailSegment.BottomSurface = Enum.SurfaceType.Smooth
+		TrailSegment.CanCollide = false
+		TrailSegment.CanQuery = false
+		TrailSegment.CanTouch = true
+		TrailSegment.CastShadow = false
+		TrailSegment.Transparency = 0.6
+	end
+	
+	-- Position segment on the floor
+	TrailSegment.CFrame = CFrame.new(FloorPosition + FloorNormal * (TrailSegment.Size.Y / 2)) * CFrame.fromMatrix(
+		Vector3.new(0, 0, 0),
+		-FloorNormal:Cross(Vector3.new(0, 1, 0)).Unit,
+		FloorNormal
+	)
+	
+	-- Store trail lifetime
+	TrailSegment:SetAttribute("TrailSpawnTime", tick())
+	TrailSegment:SetAttribute("TrailLifetime", TRAIL_LIFETIME)
+	TrailSegment.Parent = workspace
+	
+	return TrailSegment
 end
 
-local function CheckSurvivorsInTrail(TrailEffect: Instance, JohnDoe: Model, Ability: Types.Ability)
+local function UpdateCorruptTrail(self: Types.Ability)
+	if not RunService:IsServer() then
+		return
+	end
+
+	local HRP = self.OwnerProperties.HRP
+	local Character = self.OwnerProperties.Character
+	local LastTrailSpawn = os.clock()
+	local LastSurvivorCheck = os.clock()
+	
+	-- Initialize trail segment storage
+	if not self.ActiveTrailSegments then
+		self.ActiveTrailSegments = {}
+	end
+	
+	self:AddConnection(RunService.Heartbeat:Connect(function()
+		if not HRP or not HRP.Parent then
+			return
+		end
+		
+		local Now = os.clock()
+		
+		-- Spawn trail segments at intervals
+		if Now - LastTrailSpawn >= TRAIL_SPAWN_INTERVAL then
+			LastTrailSpawn = Now
+			
+			-- Spawn segment at John Doe's current position
+			local TrailSegment = CreateTrailSegment(HRP.Position, self.CustomTrailSegmentTemplate)
+			
+			if TrailSegment then
+				table.insert(self.ActiveTrailSegments, TrailSegment)
+				
+				-- Destroy segment after lifetime
+				task.delay(TRAIL_LIFETIME, function()
+					if TrailSegment and TrailSegment.Parent then
+						TrailSegment:Destroy()
+					end
+					-- Remove from active segments list
+					for i, Segment in pairs(self.ActiveTrailSegments) do
+						if Segment == TrailSegment then
+							table.remove(self.ActiveTrailSegments, i)
+							break
+						end
+					end
+				end)
+			end
+		end
+		
+		-- Check for survivors in recent trail segments
+		if Now - LastSurvivorCheck >= TRAIL_CHECK_INTERVAL then
+			LastSurvivorCheck = Now
+			
+			if self.ActiveTrailSegments then
+				for _, TrailSegment in pairs(self.ActiveTrailSegments) do
+					if TrailSegment and TrailSegment.Parent then
+						CheckSurvivorsInTrail(TrailSegment, Character, self)
+					end
+				end
+			end
+		end
+	end))
+end
+
+local function CheckSurvivorsInTrail(TrailSegment: Instance, JohnDoe: Model, Ability: Types.Ability)
 	-- Get all survivors currently in the game
 	local LoadedPlayers = ReplicatedStorage:FindFirstChild("LoadedPlayers")
 	if not LoadedPlayers then
 		return
 	end
 	
-	-- Check each survivor for intersection with trail
+	-- Check each survivor for intersection with trail segment
 	for _, PlayerFolder in pairs(LoadedPlayers:GetChildren()) do
 		local SurvivorCharacter = PlayerFolder:FindFirstChild("Character")
 		if not SurvivorCharacter or not SurvivorCharacter.PrimaryPart then
 			continue
 		end
 		
-		-- Calculate distance between trail and survivor
-		local Distance = (SurvivorCharacter.PrimaryPart.Position - TrailEffect.Position).Magnitude
-		local CheckRadius = (TrailEffect.Size.X + TrailEffect.Size.Z) / 2 + 3 -- radius of trail effect
+		-- Calculate distance between trail segment and survivor
+		local Distance = (SurvivorCharacter.PrimaryPart.Position - TrailSegment.Position).Magnitude
+		local CheckRadius = (TrailSegment.Size.X + TrailSegment.Size.Z) / 2 + 2 -- radius including buffer
 		
 		if Distance <= CheckRadius then
-			-- Survivor is in the trail
-			-- Apply highlight
+			-- Survivor is in the trail segment
+			-- Apply highlight if not already highlighted
 			local Humanoid = SurvivorCharacter:FindFirstChildOfClass("Humanoid")
 			if Humanoid and not SurvivorCharacter:GetAttribute("JohnDoeTrailHighlighted") then
 				SurvivorCharacter:SetAttribute("JohnDoeTrailHighlighted", true)
@@ -112,63 +202,6 @@ local function CheckSurvivorsInTrail(TrailEffect: Instance, JohnDoe: Model, Abil
 			end
 		end
 	end
-end
-
-local function UpdateCorruptTrail(self: Types.Ability)
-	if not RunService:IsServer() then
-		return
-	end
-
-	local HRP = self.OwnerProperties.HRP
-	local Character = self.OwnerProperties.Character
-	local TrailSpawnInterval = 0.3 -- spawn a trail effect every 0.3 seconds
-	local LastTrailSpawn = os.clock()
-	
-	-- Check for survivors in trail periodically
-	local LastSurvivorCheck = os.clock()
-	
-	self:AddConnection(RunService.Heartbeat:Connect(function()
-		if not HRP or not HRP.Parent then
-			return
-		end
-		
-		local Now = os.clock()
-		
-		-- Spawn trail effects at intervals
-		if Now - LastTrailSpawn >= TrailSpawnInterval then
-			LastTrailSpawn = Now
-			
-			-- Spawn trail slightly behind John Doe
-			local TrailPosition = HRP.Position - HRP.CFrame.LookVector * 3
-			local TrailEffect = SpawnTrailEffect(TrailPosition, self.CustomTrailModel)
-			
-			-- Store trail in ability for reference
-			if not self.ActiveTrails then
-				self.ActiveTrails = {}
-			end
-			table.insert(self.ActiveTrails, TrailEffect)
-			
-			-- Destroy trail after lifetime
-			task.delay(TRAIL_LIFETIME, function()
-				if TrailEffect and TrailEffect.Parent then
-					TrailEffect:Destroy()
-				end
-			end)
-		end
-		
-		-- Check for survivors in recent trails
-		if Now - LastSurvivorCheck >= TRAIL_CHECK_INTERVAL then
-			LastSurvivorCheck = Now
-			
-			if self.ActiveTrails then
-				for _, TrailEffect in pairs(self.ActiveTrails) do
-					if TrailEffect and TrailEffect.Parent then
-						CheckSurvivorsInTrail(TrailEffect, Character, self)
-					end
-				end
-			end
-		end
-	end))
 end
 
 --============================================================
@@ -398,8 +431,9 @@ local JohnDoe: Types.Killer = Character.CreateKiller({
 				-- Counter Animation ID (TODO: Add counter animation asset ID)
 				CounterAnimationID = "rbxassetid://0",
 				
-				-- Custom Trail Model (optional - set to a model in ReplicatedStorage for custom visuals)
-				CustomTrailModel = nil, -- TODO: Assign a custom trail model from ReplicatedStorage
+				-- Custom Trail Segment Template (optional - set to a part/model in ReplicatedStorage for custom visuals)
+				-- If not set, uses default placeholder segments
+				CustomTrailSegmentTemplate = nil, -- TODO: Assign a custom segment from ReplicatedStorage
 				
 				ExtraInit = M1ExtraInit,
 				Behaviour = OnM1Attack,
@@ -464,7 +498,7 @@ JohnDoe.Config.Description = {
 	},
 	{
 		Type = "Text",
-		Text = NameLabel .. " continuously spawns a corrupted trail that lasts " .. tostring(TRAIL_LIFETIME) .. " seconds. Survivors who step in the trail are highlighted for " .. tostring(TRAIL_LIFETIME) .. "s and grant " .. NameLabel .. " a 5% speed boost.",
+		Text = NameLabel .. " leaves a trail of corruption behind him. Every " .. tostring(TRAIL_SPAWN_INTERVAL) .. "s, a segment forms on the ground lasting " .. tostring(TRAIL_LIFETIME) .. "s. Survivors who step in the trail are highlighted and grant " .. NameLabel .. " a 5% speed boost.",
 	},
 	{
 		Type = "Separator",
