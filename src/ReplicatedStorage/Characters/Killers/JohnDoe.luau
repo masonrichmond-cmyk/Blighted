@@ -14,10 +14,10 @@ local Sounds = require(ReplicatedStorage.Modules.Sounds)
 -- Health: 31,815 (well above standard)
 -- Speed: 1.5 studs faster than survivor
 -- M1 Damage: 26 (high)
--- M1 Hitbox: Large
+-- M1 Hitbox: Large forward reach (extended Z depth, not width)
 --
 -- Passive #1 - Bulky Arm:
---   Trade-off: Longer M1 cooldown in exchange for extended hitbox reach
+--   Trade-off: Longer M1 cooldown in exchange for extended forward hitbox reach
 --
 -- Passive #2 - Counter Ability:
 --   When stunned during an ability, enters counter animation and flings stunner away
@@ -30,34 +30,29 @@ local Sounds = require(ReplicatedStorage.Modules.Sounds)
 
 local M1_BASE_COOLDOWN = 2.2        -- increased from standard 2s due to Bulky Arm passive
 local M1_DAMAGE = 26
-local M1_HITBOX_SIZE = Vector3.new(6.5, 6.5, 5.5) -- larger than standard
+local M1_HITBOX_SIZE = Vector3.new(4, 5, 7)    -- narrower width, extended forward reach (Z)
 local COUNTER_COOLDOWN = 50
 local TRAIL_LIFETIME = 4
 local TRAIL_SPEED_BOOST = 1.05      -- 5% speed boost
 local FLING_FORCE = 150             -- force for counter fling effect
+local TRAIL_CHECK_INTERVAL = 0.2    -- how often to check for survivors in trail
 
 --============================================================
 -- Corrupt Trail Management
 --============================================================
-local function UpdateCorruptTrail(self: Types.Ability)
-	if not RunService:IsServer() then
-		return
-	end
-
-	local HRP = self.OwnerProperties.HRP
-	local Character = self.OwnerProperties.Character
+local function SpawnTrailEffect(Position: Vector3, CustomTrailModel: Model?)
+	-- If a custom trail model is provided, clone and use it
+	-- Otherwise use the default visual placeholder
 	
-	-- Create trail particles/effects at regular intervals
-	self:AddConnection(RunService.Heartbeat:Connect(function()
-		if not HRP or not HRP.Parent then
-			return
-		end
-		
-		-- TODO: Create visual trail effect at HRP position
-		-- This should spawn a visible effect that lasts TRAIL_LIFETIME seconds
-		-- and applies highlight/speed boost to survivors who step in it
-		
-		local TrailEffect = Instance.new("Part")
+	local TrailEffect
+	
+	if CustomTrailModel then
+		TrailEffect = CustomTrailModel:Clone()
+		TrailEffect.Parent = workspace
+		TrailEffect:SetPrimaryPartCFrame(CFrame.new(Position))
+	else
+		-- Default placeholder trail effect
+		TrailEffect = Instance.new("Part")
 		TrailEffect.Name = "CorruptTrail"
 		TrailEffect.Shape = Enum.PartType.Ball
 		TrailEffect.Size = Vector3.new(3, 0.5, 3)
@@ -67,22 +62,112 @@ local function UpdateCorruptTrail(self: Types.Ability)
 		TrailEffect.CastShadow = false
 		TrailEffect.Transparency = 0.7
 		TrailEffect.BrickColor = BrickColor.new("Dark indigo")
-		TrailEffect.CFrame = HRP.CFrame - HRP.CFrame.LookVector * 3
+		TrailEffect.CFrame = CFrame.new(Position)
 		TrailEffect.Parent = workspace
+	end
+	
+	return TrailEffect
+end
+
+local function CheckSurvivorsInTrail(TrailEffect: Instance, JohnDoe: Model, Ability: Types.Ability)
+	-- Get all survivors currently in the game
+	local LoadedPlayers = ReplicatedStorage:FindFirstChild("LoadedPlayers")
+	if not LoadedPlayers then
+		return
+	end
+	
+	-- Check each survivor for intersection with trail
+	for _, PlayerFolder in pairs(LoadedPlayers:GetChildren()) do
+		local SurvivorCharacter = PlayerFolder:FindFirstChild("Character")
+		if not SurvivorCharacter or not SurvivorCharacter.PrimaryPart then
+			continue
+		end
 		
-		-- Touched event for survivor interaction
-		local Touched = false
-		TrailEffect.Touched:Connect(function(Hit)
-			if Touched then return end
+		-- Calculate distance between trail and survivor
+		local Distance = (SurvivorCharacter.PrimaryPart.Position - TrailEffect.Position).Magnitude
+		local CheckRadius = (TrailEffect.Size.X + TrailEffect.Size.Z) / 2 + 3 -- radius of trail effect
+		
+		if Distance <= CheckRadius then
+			-- Survivor is in the trail
+			-- Apply highlight
+			local Humanoid = SurvivorCharacter:FindFirstChildOfClass("Humanoid")
+			if Humanoid and not SurvivorCharacter:GetAttribute("JohnDoeTrailHighlighted") then
+				SurvivorCharacter:SetAttribute("JohnDoeTrailHighlighted", true)
+				
+				-- TODO: Implement highlighting visual (outline, glow, etc.)
+				-- Example: Add highlight object or modify character appearance
+				
+				-- Apply speed boost to John Doe
+				if Ability then
+					Ability.OwnerProperties.Character:SetAttribute("JohnDoeTrailSpeedActive", true)
+				end
+				
+				-- Remove highlight after trail lifetime expires
+				task.delay(TRAIL_LIFETIME, function()
+					if SurvivorCharacter and SurvivorCharacter.Parent then
+						SurvivorCharacter:SetAttribute("JohnDoeTrailHighlighted", false)
+						-- TODO: Remove highlighting visual
+					end
+				end)
+			end
+		end
+	end
+end
+
+local function UpdateCorruptTrail(self: Types.Ability)
+	if not RunService:IsServer() then
+		return
+	end
+
+	local HRP = self.OwnerProperties.HRP
+	local Character = self.OwnerProperties.Character
+	local TrailSpawnInterval = 0.3 -- spawn a trail effect every 0.3 seconds
+	local LastTrailSpawn = os.clock()
+	
+	-- Check for survivors in trail periodically
+	local LastSurvivorCheck = os.clock()
+	
+	self:AddConnection(RunService.Heartbeat:Connect(function()
+		if not HRP or not HRP.Parent then
+			return
+		end
+		
+		local Now = os.clock()
+		
+		-- Spawn trail effects at intervals
+		if Now - LastTrailSpawn >= TrailSpawnInterval then
+			LastTrailSpawn = Now
 			
-			-- TODO: Check if Hit is a survivor
-			-- If survivor: highlight them and apply speed boost to John Doe
-			Touched = true
-		end)
+			-- Spawn trail slightly behind John Doe
+			local TrailPosition = HRP.Position - HRP.CFrame.LookVector * 3
+			local TrailEffect = SpawnTrailEffect(TrailPosition, self.CustomTrailModel)
+			
+			-- Store trail in ability for reference
+			if not self.ActiveTrails then
+				self.ActiveTrails = {}
+			end
+			table.insert(self.ActiveTrails, TrailEffect)
+			
+			-- Destroy trail after lifetime
+			task.delay(TRAIL_LIFETIME, function()
+				if TrailEffect and TrailEffect.Parent then
+					TrailEffect:Destroy()
+				end
+			end)
+		end
 		
-		task.delay(TRAIL_LIFETIME, function()
-			TrailEffect:Destroy()
-		end)
+		-- Check for survivors in recent trails
+		if Now - LastSurvivorCheck >= TRAIL_CHECK_INTERVAL then
+			LastSurvivorCheck = Now
+			
+			if self.ActiveTrails then
+				for _, TrailEffect in pairs(self.ActiveTrails) do
+					if TrailEffect and TrailEffect.Parent then
+						CheckSurvivorsInTrail(TrailEffect, Character, self)
+					end
+				end
+			end
+		end
 	end))
 end
 
@@ -95,36 +180,97 @@ local function InitializeCounterAbility(self: Types.Ability)
 	end
 	
 	local Character = self.OwnerProperties.Character
+	local HRP = self.OwnerProperties.HRP
 	self.NextCounterAllowedAt = os.clock()
 	
-	-- Monitor for stun status
+	-- Monitor for stun status during ability use
+	-- A stun is typically applied via Humanoid:ApplyDescription or SetStateEnabled
 	self:AddConnection(RunService.Heartbeat:Connect(function()
-		-- TODO: Check if character is being stunned during ability use
-		-- If so and counter is available:
-		--   1. Cancel the stun
-		--   2. Play counter animation
-		--   3. Fling the stunner away
-		--   4. Set counter on cooldown
+		if not HRP or not HRP.Parent then
+			return
+		end
+		
+		local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+		if not Humanoid then
+			return
+		end
+		
+		local Now = os.clock()
+		
+		-- Check if currently stunned (Humanoid.State includes Stunned state)
+		-- State 14 is Enum.HumanoidStateType.Stunned
+		local IsCurrentlyStunned = Humanoid:GetState() == Enum.HumanoidStateType.Stunned
+		
+		-- Track previous stun state to detect the moment of stun
+		if not self.WasStunnedLastFrame then
+			self.WasStunnedLastFrame = false
+		end
+		
+		-- Stun just applied
+		if IsCurrentlyStunned and not self.WasStunnedLastFrame then
+			self.WasStunnedLastFrame = true
+			
+			-- Check if counter is available
+			if Now >= self.NextCounterAllowedAt then
+				self.NextCounterAllowedAt = Now + COUNTER_COOLDOWN
+				
+				-- TODO: Find the survivor who stunned John Doe
+				-- This requires tracking who applied the stun
+				-- For now, we'll get nearby survivors
+				
+				local LoadedPlayers = ReplicatedStorage:FindFirstChild("LoadedPlayers")
+				if LoadedPlayers then
+					-- Find closest survivor to potentially fling
+					local ClosestSurvivor = nil
+					local ClosestDistance = 50 -- 50 stud search radius
+					
+					for _, PlayerFolder in pairs(LoadedPlayers:GetChildren()) do
+						local SurvivorCharacter = PlayerFolder:FindFirstChild("Character")
+						if SurvivorCharacter and SurvivorCharacter.PrimaryPart then
+							local Distance = (SurvivorCharacter.PrimaryPart.Position - HRP.Position).Magnitude
+							if Distance < ClosestDistance then
+								ClosestDistance = Distance
+								ClosestSurvivor = SurvivorCharacter
+							end
+						end
+					end
+					
+					-- Execute counter if survivor found
+					if ClosestSurvivor then
+						ExecuteCounterFling(self, ClosestSurvivor)
+					end
+				end
+			end
+		elseif not IsCurrentlyStunned then
+			self.WasStunnedLastFrame = false
+		end
 	end))
 end
 
-local function ExecuteCounterFling(self: Types.Ability, StunnerCharacter: Model)
-	if not StunnerCharacter or not StunnerCharacter.PrimaryPart then
+local function ExecuteCounterFling(self: Types.Ability, SurvivorCharacter: Model)
+	if not SurvivorCharacter or not SurvivorCharacter.PrimaryPart then
 		return
 	end
 	
 	local HRP = self.OwnerProperties.HRP
-	local StunnerHRP = StunnerCharacter.PrimaryPart
+	local SurvivorHRP = SurvivorCharacter.PrimaryPart
 	
 	-- Calculate direction away from John Doe
-	local Direction = (StunnerHRP.Position - HRP.Position).Unit
+	local Direction = (SurvivorHRP.Position - HRP.Position).Unit
 	
-	-- Apply fling velocity to stunner
-	local Humanoid = StunnerCharacter:FindFirstChildOfClass("Humanoid")
+	-- Apply fling velocity to survivor
+	local Humanoid = SurvivorCharacter:FindFirstChildOfClass("Humanoid")
 	if Humanoid then
-		-- TODO: Play counter animation placeholder
-		-- TODO: Apply fling force to stunner
-		StunnerHRP.AssemblyLinearVelocity = Direction * FLING_FORCE
+		-- Play counter animation on John Doe (TODO: Add animation ID)
+		if self.CounterAnimationID and self.CounterAnimationID ~= "rbxassetid://0" then
+			local CounterTrack = Utils.Character.LoadAnimationFromID(self.OwnerProperties.Character, self.CounterAnimationID)
+			if CounterTrack then
+				CounterTrack:Play()
+			end
+		end
+		
+		-- Apply fling force to survivor
+		SurvivorHRP.AssemblyLinearVelocity = Direction * FLING_FORCE + Vector3.new(0, 50, 0)
 	end
 end
 
@@ -147,6 +293,64 @@ local function OnM1Attack(self: Types.Ability)
 			ExecuteOnKill = true,
 		})
 	end)
+end
+
+--============================================================
+-- Speed Boost Handler for Corrupt Trail
+--============================================================
+local function HandleTrailSpeedBoost(self: Types.Ability)
+	if not RunService:IsServer() then
+		return
+	end
+	
+	local Character = self.OwnerProperties.Character
+	local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+	
+	if not Humanoid then
+		return
+	end
+	
+	-- Monitor speed boost state
+	self:AddConnection(RunService.Heartbeat:Connect(function()
+		if not Humanoid or not Humanoid.Parent then
+			return
+		end
+		
+		-- Check if any survivors are highlighted by trail
+		local ShouldBoost = false
+		local LoadedPlayers = ReplicatedStorage:FindFirstChild("LoadedPlayers")
+		
+		if LoadedPlayers then
+			for _, PlayerFolder in pairs(LoadedPlayers:GetChildren()) do
+				local SurvivorCharacter = PlayerFolder:FindFirstChild("Character")
+				if SurvivorCharacter and SurvivorCharacter:GetAttribute("JohnDoeTrailHighlighted") then
+					ShouldBoost = true
+					break
+				end
+			end
+		end
+		
+		-- Apply or remove speed boost
+		if ShouldBoost then
+			Humanoid.WalkSpeed = Humanoid.WalkSpeed * TRAIL_SPEED_BOOST
+		end
+	end))
+end
+
+--============================================================
+-- Ability Extra Initialization
+--============================================================
+local function M1ExtraInit(self: Types.Ability)
+	if RunService:IsServer() then
+		-- Initialize Corrupt Trail (Passive #3)
+		UpdateCorruptTrail(self)
+		
+		-- Initialize Counter Ability (Passive #2)
+		InitializeCounterAbility(self)
+		
+		-- Initialize speed boost handler
+		HandleTrailSpeedBoost(self)
+	end
 end
 
 --============================================================
@@ -178,7 +382,7 @@ local JohnDoe: Types.Killer = Character.CreateKiller({
 		Speed = 1.5, -- 1.5 studs faster than survivor
 		
 		Abilities = {
-			-- M1 Attack - High damage with large hitbox, longer cooldown (Bulky Arm passive)
+			-- M1 Attack - High damage with extended forward reach, longer cooldown (Bulky Arm passive)
 			M1 = Ability.New({
 				Name = "M1",
 				InputName = "Slash",
@@ -189,38 +393,20 @@ local JohnDoe: Types.Killer = Character.CreateKiller({
 				UICorner = true,
 				Delay = 0.1,
 				HitboxSize = M1_HITBOX_SIZE,
-				HitboxOffset = CFrame.new(0, 0, -2.5),
+				HitboxOffset = CFrame.new(0, 0, -3.5), -- offset forward to match extended reach
 				
+				-- Counter Animation ID (TODO: Add counter animation asset ID)
+				CounterAnimationID = "rbxassetid://0",
+				
+				-- Custom Trail Model (optional - set to a model in ReplicatedStorage for custom visuals)
+				CustomTrailModel = nil, -- TODO: Assign a custom trail model from ReplicatedStorage
+				
+				ExtraInit = M1ExtraInit,
 				Behaviour = OnM1Attack,
 			}),
 		},
 	},
 })
-
---============================================================
--- Initialize Passives
---============================================================
--- This runs when the killer spawns
-local function InitializeJohnDoe(self: Types.Killer)
-	if not RunService:IsServer() then
-		return
-	end
-	
-	-- TODO: Initialize all three passives here
-	-- Passive #1: Bulky Arm - Already implemented via M1 cooldown
-	-- Passive #2: Counter - Initialize counter tracking
-	-- Passive #3: Corrupt Trail - Start trail spawning
-end
-
--- Placeholder for ability initialization
-local function M1ExtraInit(self: Types.Ability)
-	if RunService:IsServer() then
-		-- TODO: Additional M1 setup if needed
-	end
-end
-
--- Update M1 ability with extra init
-JohnDoe.GameplayConfig.Abilities.M1.ExtraInit = M1ExtraInit
 
 --============================================================
 -- Description (UI text for killer selection)
@@ -242,7 +428,7 @@ JohnDoe.Config.Description = {
 	},
 	{
 		Type = "Text",
-		Text = "A hulking killer with incredible durability and a powerful reach. His bulky frame comes at the cost of slower attacks, but his corruption leaves few survivors unscathed.",
+		Text = "A hulking killer with incredible durability and extended forward reach. His bulky frame comes at the cost of slower attacks, but his corruption leaves few survivors unscathed.",
 	},
 	{
 		Type = "Separator",
@@ -262,7 +448,7 @@ JohnDoe.Config.Description = {
 	},
 	{
 		Type = "Text",
-		Text = "Extended hitbox reach in exchange for increased M1 cooldown.",
+		Text = "Extended forward reach on attacks in exchange for increased M1 cooldown (" .. tostring(M1_BASE_COOLDOWN) .. "s).",
 	},
 	{
 		Type = "Header",
@@ -270,7 +456,7 @@ JohnDoe.Config.Description = {
 	},
 	{
 		Type = "Text",
-		Text = "When stunned during an ability use, " .. NameLabel .. " enters a counter animation and flings the stunner away. Cooldown: " .. tostring(COUNTER_COOLDOWN) .. "s.",
+		Text = "When stunned during an ability use, " .. NameLabel .. " automatically counters, entering an animation and flinging the stunner away. Cooldown: " .. tostring(COUNTER_COOLDOWN) .. "s.",
 	},
 	{
 		Type = "Header",
@@ -278,7 +464,7 @@ JohnDoe.Config.Description = {
 	},
 	{
 		Type = "Text",
-		Text = NameLabel .. " continuously spawns a corrupted trail that lasts " .. tostring(TRAIL_LIFETIME) .. " seconds. Survivors who step in the trail are highlighted and grant " .. NameLabel .. " a 5% speed boost.",
+		Text = NameLabel .. " continuously spawns a corrupted trail that lasts " .. tostring(TRAIL_LIFETIME) .. " seconds. Survivors who step in the trail are highlighted for " .. tostring(TRAIL_LIFETIME) .. "s and grant " .. NameLabel .. " a 5% speed boost.",
 	},
 	{
 		Type = "Separator",
@@ -290,7 +476,7 @@ JohnDoe.Config.Description = {
 	},
 	{
 		Type = "Text",
-		Text = NameLabel .. " swings with devastating force, dealing " .. tostring(M1_DAMAGE) .. " damage with a large hitbox.",
+		Text = NameLabel .. " swings with devastating forward reach, dealing " .. tostring(M1_DAMAGE) .. " damage.",
 	},
 }
 
