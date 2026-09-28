@@ -8,9 +8,8 @@ local Types = require(ReplicatedStorage.Classes.Types)
 local Utils = require(ReplicatedStorage.Modules.Utils)
 local Sounds = require(ReplicatedStorage.Modules.Sounds)
 
---============================================================
--- JOHN DOE - CHARACTER DESIGN
---============================================================
+-- JOHN DOE 
+
 -- Health: 31,815 (well above standard)
 -- Speed: 1.5 studs faster than survivor
 -- M1 Damage: 26 (high)
@@ -27,7 +26,7 @@ local Sounds = require(ReplicatedStorage.Modules.Sounds)
 --   Continuously spawns a trail that lasts 4 seconds
 --   Trail forms from small parts that connect to the floor
 --   Survivor interaction: Steps in trail -> highlighted + John Doe gets 5% speed boost
---============================================================
+
 
 local M1_BASE_COOLDOWN = 2.2        -- increased from standard 2s due to Bulky Arm passive
 local M1_DAMAGE = 26
@@ -40,36 +39,42 @@ local TRAIL_CHECK_INTERVAL = 0.2    -- how often to check for survivors in trail
 local TRAIL_SPAWN_INTERVAL = 0.2    -- spawn a trail segment every 0.2 seconds
 local TRAIL_SEGMENT_SIZE = 1.2      -- size of individual trail segments
 
---============================================================
+
 -- Trail Segment Creation and Management
---============================================================
-local function CreateTrailSegment(Position: Vector3, CustomSegmentTemplate: Instance?): Instance?
-	-- Raycast downward to find the floor
+local function CreateTrailSegment(Position: Vector3, CustomSegmentTemplate: Instance?): BasePart?
 	local RaycastParams = RaycastParams.new()
-	RaycastParams.FilterType = Enum.RaycastFilterType.Blacklist
-	RaycastParams.FilterDescendantsInstances = {workspace.Debris, workspace.Effects}
-	
-	local RayDirection = Vector3.new(0, -50, 0) -- raycast down 50 studs
-	local RayResult = workspace:Raycast(Position, RayDirection, RaycastParams)
-	
+	RaycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	RaycastParams.FilterDescendantsInstances = {
+		workspace:FindFirstChild("Debris"),
+		workspace:FindFirstChild("Effects"),
+	}
+
+	local RayResult = workspace:Raycast(
+		Position + Vector3.new(0, 2, 0),
+		Vector3.new(0, -50, 0),
+		RaycastParams
+	)
+
 	if not RayResult then
-		return nil -- no floor found, don't create segment
+		return nil
 	end
-	
+
 	local FloorPosition = RayResult.Position
 	local FloorNormal = RayResult.Normal
-	
-	-- Create or clone the trail segment
-	local TrailSegment
-	
-	if CustomSegmentTemplate then
+
+	local TrailSegment: BasePart
+
+	if CustomSegmentTemplate and CustomSegmentTemplate:IsA("BasePart") then
 		TrailSegment = CustomSegmentTemplate:Clone()
 	else
-		-- Default placeholder segment
 		TrailSegment = Instance.new("Part")
 		TrailSegment.Name = "CorruptTrailSegment"
 		TrailSegment.Shape = Enum.PartType.Block
-		TrailSegment.Size = Vector3.new(TRAIL_SEGMENT_SIZE, 0.3, TRAIL_SEGMENT_SIZE)
+		TrailSegment.Size = Vector3.new(
+			TRAIL_SEGMENT_SIZE,
+			0.3,
+			TRAIL_SEGMENT_SIZE
+		)
 		TrailSegment.Material = Enum.Material.Neon
 		TrailSegment.BrickColor = BrickColor.new("Dark indigo")
 		TrailSegment.TopSurface = Enum.SurfaceType.Smooth
@@ -80,21 +85,38 @@ local function CreateTrailSegment(Position: Vector3, CustomSegmentTemplate: Inst
 		TrailSegment.CastShadow = false
 		TrailSegment.Transparency = 0.6
 	end
-	
-	-- Position segment on the floor
-	TrailSegment.CFrame = CFrame.new(FloorPosition + FloorNormal * (TrailSegment.Size.Y / 2)) * CFrame.fromMatrix(
-		Vector3.new(0, 0, 0),
-		-FloorNormal:Cross(Vector3.new(0, 1, 0)).Unit,
-		FloorNormal
+
+	-- Build a stable orientation from the floor normal.
+	local Up = FloorNormal
+
+	local Forward = Vector3.new(0, 0, -1)
+
+	-- If the normal is too close to our chosen forward vector,
+	-- use another direction.
+	if math.abs(Up:Dot(Forward)) > 0.99 then
+		Forward = Vector3.new(1, 0, 0)
+	end
+
+	local Right = Forward:Cross(Up).Unit
+	Forward = Up:Cross(Right).Unit
+
+	local Rotation = CFrame.fromMatrix(
+		FloorPosition + FloorNormal * (TrailSegment.Size.Y / 2),
+		Right,
+		Up,
+		-Forward
 	)
-	
-	-- Store trail lifetime
-	TrailSegment:SetAttribute("TrailSpawnTime", tick())
+
+	TrailSegment.CFrame = Rotation
+
+	TrailSegment:SetAttribute("TrailSpawnTime", os.clock())
 	TrailSegment:SetAttribute("TrailLifetime", TRAIL_LIFETIME)
+
 	TrailSegment.Parent = workspace
-	
+
 	return TrailSegment
 end
+
 
 local function UpdateCorruptTrail(self: Types.Ability)
 	if not RunService:IsServer() then
@@ -204,9 +226,7 @@ local function CheckSurvivorsInTrail(TrailSegment: Instance, JohnDoe: Model, Abi
 	end
 end
 
---============================================================
 -- Counter Ability - Stun Deflection (Passive #2)
---============================================================
 local function InitializeCounterAbility(self: Types.Ability)
 	if not RunService:IsServer() then
 		return
@@ -307,9 +327,7 @@ local function ExecuteCounterFling(self: Types.Ability, SurvivorCharacter: Model
 	end
 end
 
---============================================================
 -- M1 Attack Setup
---============================================================
 local function OnM1Attack(self: Types.Ability)
 	local Character = self.OwnerProperties.Character
 	local HRP = self.OwnerProperties.HRP
@@ -328,9 +346,7 @@ local function OnM1Attack(self: Types.Ability)
 	end)
 end
 
---============================================================
 -- Speed Boost Handler for Corrupt Trail
---============================================================
 local function HandleTrailSpeedBoost(self: Types.Ability)
 	if not RunService:IsServer() then
 		return
@@ -370,9 +386,7 @@ local function HandleTrailSpeedBoost(self: Types.Ability)
 	end))
 end
 
---============================================================
 -- Ability Extra Initialization
---============================================================
 local function M1ExtraInit(self: Types.Ability)
 	if RunService:IsServer() then
 		-- Initialize Corrupt Trail (Passive #3)
@@ -386,9 +400,7 @@ local function M1ExtraInit(self: Types.Ability)
 	end
 end
 
---============================================================
 -- Character Definition
---============================================================
 local JohnDoe: Types.Killer = Character.CreateKiller({
 	Config = {
 		Name = "John Doe",
